@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Syncing Data III</title>
+    <meta charset="utf-8"/>
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding:0;
+      }
+      
+      canvas {
+        margin: 10px;
+        border: 1px solid black;
+      }
+    </style>
+    <script src="/socket.io/socket.io.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-core/5.8.34/browser.min.js"></script>
+	<script type="text/babel">  
+        "use strict";
+    
+        let canvas;
+        let ctx;
+        //our websocket connection
+        let socket; //this user's socket
+        let hash;  //this user's personal object id, needed to identify themselves
+        let moveRight = false; //right or d held
+        let moveLeft = false;  //left or a held
+        let jump = false; //space held
+
+        //object to hold all of our squares
+        //These will be all of our user's objects
+        //indexed by that user's unique id (hash from the server)
+        let squares = {};
+        
+        //function to update a square 
+        //(single square sent from the server)
+        const update = (data) => {
+            //do we have that user?
+            //check if square's has a variable named by
+            //the hash of the object sent
+            if(!squares[data.hash]) {
+                //if not, add the entire object using the hash as an id in our squares object
+                squares[data.hash] = data;
+                //return since there's nothing else to do now 
+                return;
+            }
+          
+            //grab our matching object based on the id of the object received
+            const square = squares[data.hash];
+          
+            //if the square to update has a later update time than
+            //the packet we just got (due to lag or something)
+            //we don't want to process it. It's old data.
+            if(squares[data.hash].lastUpdate >= data.lastUpdate) {
+                return;
+            }
+          
+            //overwrite our lastUpdate with the one from the object
+            square.lastUpdate = data.lastUpdate;
+            
+            square.prevX = data.prevX;
+            square.prevY = data.prevY;
+            square.destX = data.destX;
+            square.destY = data.destY;
+            square.alpha = 0;
+        };
+        
+        //remove a user object by the object's id
+        //id is the hash from the server of an object
+        const removeUser = (hash) => {
+          //if we have that object
+          if(squares[hash]) {
+            //delete it from our squares object
+            delete squares[hash];
+          }
+        };
+        
+        //set this user's object from the server
+        //data will be this user's object
+        const setUser = (data) => {
+          //set this user's hash (this user's id)
+          //since they will need it to identify
+          //themselves
+          hash = data.hash;
+          //add this user's object to our square's object 
+          //by this user's id.
+          //alternatively we could store this user's object
+          //separately and draw it. There may be use cases 
+          //to do that, but for now all of our objects are
+          //drawn and used identically.
+          squares[hash] = data;
+          
+          //redraw with our latest info
+          requestAnimationFrame(redraw);
+        };
+        
+        /**
+          linear interpolation (lerp) function
+          This will calculate how far a number should be
+          based on position 1 (v0), position 2 (v1) and
+          how far between in % it is (alpha).
+          
+          An alpha of 0 is at the previous position (A)
+          An alpha of 1 is at the destination position (B)
+          An alpha of 0.5 is halfway between A and B.
+        **/
+        const lerp = (v0, v1, alpha) => {
+          //There are many different lerping algorithms
+          //not just this one. They all have slightly
+          //different results, but are mostly similar.
+          return (1 - alpha) * v0 + alpha * v1;
+        };
+        
+        //update this user's position
+        const updatePosition = () => {
+          //grab our user's square based on our user's id (hash)
+          const square = squares[hash];
+
+          //set our user's previous positions to their last positions
+          square.prevX = square.x;
+          square.prevY = square.y;
+          
+          //if the user is going left but not off screen
+          //move their destination left (so we can animate)
+          //from our current x
+          if(moveLeft && square.destX > 0) {
+            square.destX -= 2;
+          }
+          //if the user is moving right but not off screen
+          //move their destination right (so we can animate)
+          //from our current x
+          if(moveRight && square.destX < 400) {
+            square.destX += 2;
+          }
+            
+            //TODO
+            //if the user wants to jump
+          //if(data != undefined)
+            //square.destY = data.destY;
+
+            if(jump && square.destY > 0){
+                square.destY -= 50;
+                jump = false;
+            }
+
+          //reset our alpha since we are moving
+          //want to reset the animation to keep playing
+          square.alpha = 0.05;
+
+          /**
+            normally we could emit here for 60fps 
+            since this is invoked by redraw (requestAnimationFrame).
+            
+            NOTICE! - We have moved this emit to sendWithLag to 
+                      simulate lag based on a timer. 
+          **/
+          socket.emit('movementUpdate', square);
+        };
+        
+        //redraw our player objects (requestAnimationFrame)
+        const redraw = (time) => {
+          //update our current user's position
+          updatePosition();
+
+          //clear screen
+          ctx.clearRect(0, 0, 500, 500);
+
+          //grab all the variable names from our squares
+          //these will actually be the user id's (hashes)
+          //since that's how we index
+          const keys = Object.keys(squares);
+
+          //for each key in squares
+          for(let i = 0; i < keys.length; i++) {
+            //grab the square by user id (from our keys)
+            const square = squares[keys[i]];
+
+            //if alpha less than 1, increase it by 0.05
+            //This will keep the animation running smoothly
+            //You can modify the speed of this if you want.
+            //It will increase or slow the animation time.
+            if(square.alpha < 1) square.alpha += 0.05;
+              
+            //calculate this square's x and y based on lerping
+            //between where their previous and destination positions
+            //are along with the alpha value (of how far they are to it).
+            square.x = lerp(square.prevX, square.destX, square.alpha);
+            square.y = lerp(square.prevY, square.destY, square.alpha);
+              
+            //set default fillstyle to black for the border
+            ctx.fillStyle = "black";
+            //if this square is our user's square 
+            //by checking our user's id (hash)
+            //If so, we'll draw ourselves in random 
+            //to stand out
+            if(square.hash === hash) {
+                //use a slightly offset, larger, black square for the user's square to have a border to make it more recognizable 
+                ctx.fillRect(square.x - 2, square.y - 2, square.width + 4, square.height + 4);
+            }
+              
+            //set to proper user's color
+            ctx.fillStyle = square.color;
+            //draw this square (based on the lerped positions)
+            ctx.fillRect(square.x, square.y, square.width, square.height);
+          }
+
+          //redraw (hopefully at 60fps)
+          requestAnimationFrame(redraw);
+        };
+        
+        //handle key down
+        const keyDownHandler = (e) => {  
+          //grab keycode from keyboard event
+          var keyPressed = e.which;
+          // A OR LEFT
+          if(keyPressed === 65 || keyPressed === 37) {
+            moveLeft = true;
+          }
+          // D OR RIGHT
+          else if(keyPressed === 68 || keyPressed === 39) {
+            moveRight = true;
+          }
+            
+          else if(keyPressed === 32){
+              jump = true;
+          }
+
+          //if one of these keys is down, let's cancel the browsers
+          //default action so the page doesn't try to scroll on the user
+          if(moveLeft || moveRight || jump) {
+            e.preventDefault();
+          }
+        };
+        
+        //key up event
+        const keyUpHandler = (e) => {
+          //grab keycode from keyboard event
+          var keyPressed = e.which;
+            
+          // A OR LEFT 32 32
+          if(keyPressed === 65 || keyPressed === 37) {
+            moveLeft = false;
+          }
+          // D OR RIGHT
+          else if(keyPressed === 68 || keyPressed === 39) {
+            moveRight = false;
+          }       
+            
+        };
+
+        const init = () => {
+          canvas = document.querySelector("#canvas");
+          ctx = canvas.getContext("2d");
+
+          //connect to the server
+          //only running once so we don't open multiple
+          //connections.
+          socket = io.connect(); 
+
+          //when the socket receives a 'joined'
+          //event from the server, call setUser
+          socket.on('joined', setUser);
+
+          //when the socket receives an 'updatedMovement'
+          //event from the server, call update
+          socket.on('updatedMovement', update);
+
+          //when the socket receives a 'left'
+          //event from the server, call removeUser
+          socket.on('left', removeUser);
+
+          //key listeners
+          document.body.addEventListener('keydown', keyDownHandler);
+          document.body.addEventListener('keyup', keyUpHandler);
+        };
+
+      window.onload = init;
+    </script>
+</head>
+<body>
+    <canvas id="canvas" height="500" width="500">Please use an HTML 5 browser</canvas>
+</body>
+</html>
